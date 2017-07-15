@@ -65,6 +65,14 @@ int main(int argc, char** argv)
       saxpyCuda(N, alpha, xarray, yarray, resultarray);
     }
 
+    // for(int i=0; i<N; i++) {
+    //     float serial = alpha * xarray[i] + yarray[i];
+    //     if(resultarray[i] != serial) {
+    //         printf("element %d mismatch\tcuda: %f\tserial: %f\n", 
+    //             i, resultarray[i], serial);
+    //     }
+    // }
+
     delete [] xarray;
     delete [] yarray;
     delete [] resultarray;
