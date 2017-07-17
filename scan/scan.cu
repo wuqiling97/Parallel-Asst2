@@ -108,8 +108,6 @@ double cudaScan(int* inarray, int* end, int* resultarray)
     int rounded_length = nextPow2(end - inarray);
     cudaMalloc((void **)&device_result, sizeof(int) * rounded_length);
     cudaMalloc((void **)&device_input, sizeof(int) * rounded_length);
-    cudaMemset(device_result, 0, sizeof(int) * rounded_length);
-    cudaMemset(device_input, 0, sizeof(int) * rounded_length);
     cudaMemcpy(device_input, inarray, (end - inarray) * sizeof(int), 
                cudaMemcpyHostToDevice);
 
@@ -165,6 +163,23 @@ double cudaScanThrust(int* inarray, int* end, int* resultarray) {
     return overallDuration;
 }
 
+__global__ void caculate_isrepeat(int length, int* input, int* isrepeat)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    if(index < length-1) {
+        isrepeat[index] = (input[index] == input[index+1]);
+    }
+}
+
+__global__ void write_output(int length, int* isrepeat, int* output)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+    int output_idx;
+    if(index < length-1 && (output_idx = isrepeat[index]) != isrepeat[index+1]) {
+        output[output_idx] = index;
+    }
+}
+
 int find_repeats(int *device_input, int length, int *device_output) {
     /* Finds all pairs of adjacent repeated elements in the list, storing the
      * indices of the first element of each pair (in order) into device_result.
@@ -177,7 +192,21 @@ int find_repeats(int *device_input, int length, int *device_output) {
      * it requires that. However, you must ensure that the results of
      * find_repeats are correct given the original length.
      */    
-    return 0;
+    const int threadsPerBlock = 512;
+    int* isrepeat; // if a[i]==a[i+1], isrepeat[i] = 1;
+    int rlength = nextPow2(length); // rounded length
+    cudaMalloc(&isrepeat, rlength * sizeof(int));
+    cudaMemset(isrepeat, 0, rlength * sizeof(int));
+
+    const int blocks = unitcount(length-1, threadsPerBlock);
+    caculate_isrepeat<<<blocks, threadsPerBlock>>>(length, device_input, isrepeat);
+    exclusive_scan(isrepeat, length, isrepeat);
+    write_output<<<blocks, threadsPerBlock>>>(length, isrepeat, device_output);
+    // get output size
+    int output_size;
+    cudaMemcpy(&output_size, isrepeat+length-1, sizeof(int), cudaMemcpyDeviceToHost);
+
+    return output_size;
 }
 
 /* Timing wrapper around find_repeats. You should not modify this function.
