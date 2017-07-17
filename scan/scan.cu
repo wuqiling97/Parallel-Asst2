@@ -28,6 +28,39 @@ static inline int nextPow2(int n)
     return n;
 }
 
+// caculate the unit number needed to do the task
+inline int unitcount(int tasksize, int unitsize) {
+    return (tasksize + unitsize - 1)/unitsize;
+}
+
+__global__ void scan_upsweep(int length, int* result, int twod)
+{
+    int twod1 = twod << 1;
+    // i += twod1
+    int index = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+
+    if(index < length)
+        result[index - 1 + twod1] += result[index - 1 + twod];
+}
+
+__global__ void scan_lastone(int length, int* result)
+{
+    result[length-1] = 0;
+}
+
+__global__ void scan_downsweep(int length, int* result, int twod)
+{
+    int twod1 = twod << 1;
+    // i += twod1
+    int i = (blockIdx.x * blockDim.x + threadIdx.x) * twod1;
+
+    if(i < length) {
+        int t = result[i + twod - 1];
+        result[i + twod - 1] = result[i + twod1 - 1];
+        result[i + twod1 - 1] += t;
+    }
+}
+
 void exclusive_scan(int* device_start, int length, int* device_result)
 {
     /* Fill in this function with your exclusive scan implementation.
@@ -39,6 +72,23 @@ void exclusive_scan(int* device_start, int length, int* device_result)
      * both the input and the output arrays are sized to accommodate the next
      * power of 2 larger than the input.
      */
+    const int threadsPerBlock = 512;
+    const int rlength = nextPow2(length);
+    cudaMemcpy(device_result, device_start, 
+               length*sizeof(int), cudaMemcpyDeviceToDevice);
+    // upsweep phase
+    for(int twod=1; twod<rlength; twod*=2) {
+        int twod1 = twod*2;
+        const int blocks = unitcount(unitcount(rlength, twod1), threadsPerBlock);
+        scan_upsweep<<<blocks, threadsPerBlock>>>(rlength, device_result, twod);
+    }
+    scan_lastone<<<1, 1>>>(rlength, device_result);
+
+    for(int twod = rlength/2; twod >= 1; twod /= 2) {
+        int twod1 = twod*2;
+        const int blocks = unitcount(unitcount(rlength, twod1), threadsPerBlock);
+        scan_downsweep<<<blocks, threadsPerBlock>>>(rlength, device_result, twod);
+    }
 }
 
 /* This function is a wrapper around the code you will write - it copies the
@@ -58,6 +108,8 @@ double cudaScan(int* inarray, int* end, int* resultarray)
     int rounded_length = nextPow2(end - inarray);
     cudaMalloc((void **)&device_result, sizeof(int) * rounded_length);
     cudaMalloc((void **)&device_input, sizeof(int) * rounded_length);
+    cudaMemset(device_result, 0, sizeof(int) * rounded_length);
+    cudaMemset(device_input, 0, sizeof(int) * rounded_length);
     cudaMemcpy(device_input, inarray, (end - inarray) * sizeof(int), 
                cudaMemcpyHostToDevice);
 
