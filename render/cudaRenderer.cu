@@ -8,11 +8,33 @@
 #include <cuda_runtime.h>
 #include <driver_functions.h>
 
+#include <thrust/device_ptr.h>
+#include <thrust/extrema.h>
+
 #include "cudaRenderer.h"
 #include "image.h"
 #include "noise.h"
 #include "sceneLoader.h"
 #include "util.h"
+
+
+#define DEBUG
+
+#ifdef DEBUG
+#define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
+inline void cudaAssert(cudaError_t code, const char *file, int line, bool abort=true)
+{
+   if (code != cudaSuccess) 
+   {
+      fprintf(stderr, "CUDA Error: %s at %s:%d\n", 
+        cudaGetErrorString(code), file, line);
+      if (abort) exit(code);
+   }
+}
+#else
+#define cudaCheckError(ans) ans
+#endif
+
 
 ////////////////////////////////////////////////////////////////////////////////////////
 // Putting all the cuda kernels here
@@ -31,6 +53,18 @@ struct GlobalConstants {
     int imageWidth;
     int imageHeight;
     float* imageData;
+};
+
+struct BoundingBox {
+    int minX, maxX, minY, maxY;
+    int width, height;
+    int pixelnum;
+
+    BoundingBox() {}
+
+    BoundingBox(int minX, int maxX, int minY, int maxY, int w, int h, int pixelnum):
+        minX(minX), maxX(maxX), minY(minY), maxY(maxY), 
+        width(w), height(h), pixelnum(pixelnum) {}
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -324,7 +358,7 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
     float diffY = p.y - pixelCenter.y;
     float pixelDist = diffX * diffX + diffY * diffY;
 
-    float rad = cuConstRendererParams.radius[circleIndex];;
+    float rad = cuConstRendererParams.radius[circleIndex];
     float maxDist = rad * rad;
 
     // circle does not contribute to the image
@@ -425,8 +459,126 @@ __global__ void kernelRenderCircles() {
     }
 }
 
+__global__ void kernelGetBBox(BoundingBox* bound_box)
+{
+    int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (index >= cuConstRendererParams.numCircles)
+        return;
+
+    int index3 = 3 * index;
+
+    // read position and radius
+    float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
+    float  rad = cuConstRendererParams.radius[index];
+
+    // compute the bounding box of the circle. The bound is in integer
+    // screen coordinates, so it's clamped to the edges of the screen.
+    short imageWidth = cuConstRendererParams.imageWidth;
+    short imageHeight = cuConstRendererParams.imageHeight;
+    short minX = static_cast<short>(imageWidth * (p.x - rad));
+    short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
+    short minY = static_cast<short>(imageHeight * (p.y - rad));
+    short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
+
+    // a bunch of clamps.  Is there a CUDA built-in for this?
+    short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
+    short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
+    short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
+    short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
+    int width = screenMaxX - screenMinX;
+    int height = screenMaxY - screenMinY;
+    int pixelnum = width * height;
+
+    bound_box[index] = BoundingBox(
+        screenMinX, screenMaxX, screenMinY, screenMaxY, width, height, pixelnum
+    );
+}
+
+__global__ void kernelGetPixelCricleNum(int* pixel_circlenum, int2 topleft, int circleIndex)
+{
+    int pixelX = blockDim.x * blockIdx.x + threadIdx.x + topleft.x;
+    int pixelY = blockDim.y * blockIdx.y + threadIdx.y + topleft.y;
+    float3 circlePos = *(float3*)(&cuConstRendererParams.position[3*circleIndex]);
+    const int width = cuConstRendererParams.imageWidth;
+    const int height = cuConstRendererParams.imageHeight;
+
+    int pixelIdx = pixelY * width + pixelX;
+    float pXcenter = float(pixelX)/width + 0.5;
+    float pYcenter = float(pixelY)/height + 0.5;
+    float diffX = pXcenter - circlePos.x;
+    float diffY = pYcenter - circlePos.y;
+    float distance = diffX*diffX + diffY*diffY;
+    float radius = cuConstRendererParams.radius[circleIndex];
+
+    if(distance <= radius*radius)
+        atomicAdd(pixel_circlenum + pixelIdx, 1);
+}
+
+
+
 ////////////////////////////////////////////////////////////////////////////////////////
 
+// caculate the unit number needed to do the task
+inline int unitcount(int tasksize, int unitsize)
+{
+    return (tasksize + unitsize - 1)/unitsize;
+}
+
+template<typename T>
+T cudaThrustMax(T* arr, int length)
+{
+    thrust::device_ptr<T> dev_arr(arr);
+    T ret = *thrust::max_element(dev_arr, dev_arr + length);
+    return ret;
+}
+
+void
+CudaRenderer::render() 
+{
+    // 256 threads per block is a healthy number
+    const dim3 blockDim(256, 1);
+    dim3 gridDim(unitcount(numCircles, blockDim.x));
+    const int tot_pixelnum = image->width * image->height;
+
+    // record every pixel's circle number
+    int* dev_pixel_circlenum;
+    cudaMalloc(&dev_pixel_circlenum, tot_pixelnum * sizeof(int));
+    cudaMemset(dev_pixel_circlenum, 0, tot_pixelnum * sizeof(int));
+
+    // 计算bounding box, 并传回host
+    BoundingBox* dev_bound_box;
+    BoundingBox* bound_box;
+    bound_box = new BoundingBox[numCircles];
+    cudaMalloc(&dev_bound_box, numCircles * sizeof(BoundingBox));
+
+    kernelGetBBox<<<gridDim, blockDim>>>(dev_bound_box);
+    cudaCheckError(cudaDeviceSynchronize());
+    cudaMemcpy(bound_box, dev_bound_box, numCircles * sizeof(BoundingBox), cudaMemcpyDeviceToHost);
+
+    // 统计每个像素上圆的数量
+    for(int i=0; i<numCircles; i++) {
+        const dim3 blockDim(16, 16);
+        const BoundingBox& box = bound_box[i];
+        dim3 gridDim(unitcount(box.width, blockDim.x), unitcount(box.height, blockDim.y));
+        kernelGetPixelCricleNum<<<gridDim, blockDim>>>(dev_pixel_circlenum, make_int2(box.minX, box.minY), i);
+    }
+    cudaCheckError(cudaDeviceSynchronize());
+
+    // 分配每个像素存储圆编号的内存
+    int* dev_pixel_circle;
+    int max_pixel_circlenum = cudaThrustMax(dev_pixel_circlenum, tot_pixelnum);
+    cudaMalloc(&dev_pixel_circle, sizeof(int)*max_pixel_circlenum*tot_pixelnum);
+
+
+
+    kernelRenderCircles<<<gridDim, blockDim>>>(dev_pixel_circlenum);
+    cudaCheckError(cudaDeviceSynchronize());
+
+    delete[] bound_box;
+    cudaFree(dev_pixel_circlenum);
+    cudaFree(dev_bound_box);
+}
 
 CudaRenderer::CudaRenderer() {
     image = NULL;
@@ -631,13 +783,3 @@ CudaRenderer::advanceAnimation() {
     cudaDeviceSynchronize();
 }
 
-void
-CudaRenderer::render() {
-
-    // 256 threads per block is a healthy number
-    dim3 blockDim(256, 1);
-    dim3 gridDim((numCircles + blockDim.x - 1) / blockDim.x);
-
-    kernelRenderCircles<<<gridDim, blockDim>>>();
-    cudaDeviceSynchronize();
-}
