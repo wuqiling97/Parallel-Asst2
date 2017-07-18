@@ -507,6 +507,26 @@ __global__ void kernelGetPixelCricleList(
 	}
 }
 
+__global__ void kernelSortPixel(
+	int* pixel_circle_list, int* pixel_circlenum, int max_pixel_circlenum
+)
+{
+	int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
+	int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
+	if(pixelX >= cuConstRendererParams.imageWidth || 
+	   pixelY >= cuConstRendererParams.imageHeight)
+		return;
+
+	const int width = cuConstRendererParams.imageWidth;
+	const int height = cuConstRendererParams.imageHeight;
+	int pixelIdx = pixelY * width + pixelX;
+	int circle_count = pixel_circlenum[pixelIdx];
+	int list_start = max_pixel_circlenum * pixelIdx;
+	int* thislist = pixel_circle_list + list_start;
+
+	thrust::sort(thrust::device, thislist, thislist + circle_count);
+}
+
 __global__ void kernelGetPixelColor(
 	int* pixel_circle_list, int* pixel_circlenum, int max_pixel_circlenum
 )
@@ -534,6 +554,7 @@ __global__ void kernelGetPixelColor(
 		shadePixel(circleIdx, make_float2(pXcenter, pYcenter), pos, imgPtr);
 	}
 }
+
 
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -636,17 +657,23 @@ CudaRenderer::render()
 
 	printf("get list finished\n");
 
-	for(int i=0, j=0; i<tot_pixelnum; i++) {
-		cudaThrustSort(dev_pixel_circle_list + j, dev_pixel_circle_list + j + pixel_circlenum[i]);
-		j += max_pixel_circlenum;
-	}
+	// for(int i=0, j=0; i<tot_pixelnum; i++) {
+	// 	cudaThrustSort(dev_pixel_circle_list + j, dev_pixel_circle_list + j + pixel_circlenum[i]);
+	// 	j += max_pixel_circlenum;
+	// }
+	const dim3 blockDim2(16, 16);
+	const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
+	kernelSortPixel<<<gridDim2, blockDim2>>>(
+		dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
+
 	cudaCheckError(cudaDeviceSynchronize());
 
 	printf("sort finished\n");
 
-	const dim3 blockDim2(16, 16);
-	const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
-	kernelGetPixelColor<<<gridDim2, blockDim2>>>(dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
+	// const dim3 blockDim2(16, 16);
+	// const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
+	kernelGetPixelColor<<<gridDim2, blockDim2>>>(
+		dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
 	cudaCheckError(cudaDeviceSynchronize());
 
 	printf("all finished\n");
