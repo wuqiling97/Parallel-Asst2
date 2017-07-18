@@ -12,12 +12,14 @@
 #include <thrust/device_ptr.h>
 #include <thrust/extrema.h>
 #include <thrust/sort.h>
+#include <thrust/execution_policy.h>
 
 #include "cudaRenderer.h"
 #include "image.h"
 #include "noise.h"
 #include "sceneLoader.h"
 #include "util.h"
+#include "cycleTimer.h"
 
 using std::cout; using std::endl;
 
@@ -471,9 +473,6 @@ __global__ void kernelGetPixelCricleNum(int* pixel_circlenum, int2 topleft, int 
 	if(distance <= radius*radius)
 		atomicAdd(pixel_circlenum + pixelIdx, 1);
 
-	// if(circleIndex==0 && pixelY==512 && pixelX%10==0) {
-	// 	printf("(%d, %d), diffxy: %f %f  radius: %f\n", pixelX, pixelY, diffX, diffY, radius);
-	// }
 }
 
 __global__ void kernelGetPixelCricleList(
@@ -507,26 +506,6 @@ __global__ void kernelGetPixelCricleList(
 	}
 }
 
-__global__ void kernelSortPixel(
-	int* pixel_circle_list, int* pixel_circlenum, int max_pixel_circlenum
-)
-{
-	int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
-	int pixelY = blockDim.y * blockIdx.y + threadIdx.y;
-	if(pixelX >= cuConstRendererParams.imageWidth || 
-	   pixelY >= cuConstRendererParams.imageHeight)
-		return;
-
-	const int width = cuConstRendererParams.imageWidth;
-	const int height = cuConstRendererParams.imageHeight;
-	int pixelIdx = pixelY * width + pixelX;
-	int circle_count = pixel_circlenum[pixelIdx];
-	int list_start = max_pixel_circlenum * pixelIdx;
-	int* thislist = pixel_circle_list + list_start;
-
-	thrust::sort(thrust::device, thislist, thislist + circle_count);
-}
-
 __global__ void kernelGetPixelColor(
 	int* pixel_circle_list, int* pixel_circlenum, int max_pixel_circlenum
 )
@@ -544,17 +523,23 @@ __global__ void kernelGetPixelColor(
 	int list_start = max_pixel_circlenum * pixelIdx;
 	int* thislist = pixel_circle_list + list_start;
 
+	int* list = new int[circle_count];
+	for(int i=0; i<circle_count; i++)
+		list[i] = thislist[i];
+
+	thrust::sort(thrust::device, list, list + circle_count);
+
 	float pXcenter = float(pixelX + 0.5)/width;
 	float pYcenter = float(pixelY + 0.5)/height;
 
 	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * pixelIdx]);
 	for(int i=0; i<circle_count; i++) {
-		int circleIdx = thislist[i];
+		int circleIdx = list[i];
 		float3 pos = *(float3*)(&cuConstRendererParams.position[3*circleIdx]);
 		shadePixel(circleIdx, make_float2(pXcenter, pYcenter), pos, imgPtr);
 	}
+	delete[] list;
 }
-
 
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -583,6 +568,8 @@ void cudaThrustSort(T* begin, T* end)
 void
 CudaRenderer::render() 
 {
+	double start = CycleTimer::currentSeconds();
+
 	// 256 threads per block is a healthy number
 	const dim3 blockDim(256, 1);
 	dim3 gridDim(unitcount(numCircles, blockDim.x));
@@ -597,11 +584,7 @@ CudaRenderer::render()
 	kernelGetBBox<<<gridDim, blockDim>>>(dev_bound_box);
 	cudaCheckError(cudaDeviceSynchronize());
 	cudaMemcpy(bound_box, dev_bound_box, numCircles * sizeof(BoundingBox), cudaMemcpyDeviceToHost);
-
-	//right
-	// for(int i=0; i<numCircles; i++) {
-	// 	cout<<i<<' '<<bound_box[i]<<endl;
-	// }
+	cudaFree(dev_bound_box);
 
 	// record every pixel's circle number
 	int* dev_pixel_circlenum;
@@ -623,18 +606,15 @@ CudaRenderer::render()
 	cudaMemcpy(pixel_circlenum, dev_pixel_circlenum, 
 		       tot_pixelnum * sizeof(int), cudaMemcpyDeviceToHost);
 
-	// for(int x=0; x<image->width; x++) {
-	// 	for(int y=0; y<image->height; y++) {
-	// 		if(y==512 && x%20==0) {
-	// 			printf("(%d, %d), circle num : %d\n", x, y, pixel_circlenum[y*image->width + x]);
-	// 		}
-	// 	}
-	// }
+	double circlenum = CycleTimer::currentSeconds();
+	printf("caculate circle number: %f ms\n", (circlenum-start)*1000);
+
 
 
 	// 分配每个像素存储圆编号的内存
 	int* dev_pixel_circle_list;
 	int max_pixel_circlenum = cudaThrustMax(dev_pixel_circlenum, tot_pixelnum);
+	printf("max: %d\n", max_pixel_circlenum);
 	cudaMalloc(&dev_pixel_circle_list, sizeof(int)*max_pixel_circlenum*tot_pixelnum);
 
 	int* dev_pixel_list_ptr; //当前圆编号列表大小
@@ -642,6 +622,8 @@ CudaRenderer::render()
 	cudaCheckError(cudaMemset(dev_pixel_list_ptr, 0, sizeof(int)*tot_pixelnum));
 
 	printf("get list begin\n");
+
+
 
 	// 获得每个像素上圆的列表(无序)
 	for(int i=0; i<numCircles; i++) {
@@ -656,32 +638,26 @@ CudaRenderer::render()
 	cudaCheckError(cudaDeviceSynchronize())
 
 	printf("get list finished\n");
+	double getlist = CycleTimer::currentSeconds();
+	printf("get list: %f ms\n", (getlist-start)*1000);
 
-	// for(int i=0, j=0; i<tot_pixelnum; i++) {
-	// 	cudaThrustSort(dev_pixel_circle_list + j, dev_pixel_circle_list + j + pixel_circlenum[i]);
-	// 	j += max_pixel_circlenum;
-	// }
+
+
+	// sort并计算颜色
 	const dim3 blockDim2(16, 16);
 	const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
-	kernelSortPixel<<<gridDim2, blockDim2>>>(
-		dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
-
-	cudaCheckError(cudaDeviceSynchronize());
-
-	printf("sort finished\n");
-
-	// const dim3 blockDim2(16, 16);
-	// const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
 	kernelGetPixelColor<<<gridDim2, blockDim2>>>(
 		dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
+
 	cudaCheckError(cudaDeviceSynchronize());
 
+	double end = CycleTimer::currentSeconds();
+	printf("end time: %f ms\n", (end-start)*1000);
 	printf("all finished\n");
 
 	delete[] bound_box;
 	delete[] pixel_circlenum;
 	cudaFree(dev_pixel_circlenum);
-	cudaFree(dev_bound_box);
 	cudaFree(dev_pixel_circle_list);
 	cudaFree(dev_pixel_list_ptr);
 }
