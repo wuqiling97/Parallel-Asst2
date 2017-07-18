@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <vector>
+#include <iostream>
 
 #include <cuda.h>
 #include <cuda_runtime.h>
@@ -18,6 +19,7 @@
 #include "sceneLoader.h"
 #include "util.h"
 
+using std::cout; using std::endl;
 
 #define DEBUG
 
@@ -66,6 +68,11 @@ struct BoundingBox {
 	__host__ __device__ BoundingBox(int minX, int maxX, int minY, int maxY, int w, int h, int pixelnum):
 		minX(minX), maxX(maxX), minY(minY), maxY(maxY), 
 		width(w), height(h), pixelnum(pixelnum) {}
+
+	friend std::ostream& operator<<(std::ostream& out, const BoundingBox& box) {
+		out<<"min, max X, Y  "<<box.minX<<' '<<box.maxX<<' '<<box.minY<<' '<<box.maxY;
+		return out;
+	}
 };
 
 // Global variable that is in scope, but read-only, for all cuda
@@ -406,54 +413,6 @@ shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr)
 	// END SHOULD-BE-ATOMIC REGION
 }
 
-// kernelRenderCircles -- (CUDA device code)
-//
-// Each thread renders a circle.  Since there is no protection to
-// ensure order of update or mutual exclusion on the output image, the
-// resulting image will be incorrect.
-__global__ void kernelRenderCircles() {
-
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-
-	if (index >= cuConstRendererParams.numCircles)
-		return;
-
-	int index3 = 3 * index;
-
-	// read position and radius
-	float3 p = *(float3*)(&cuConstRendererParams.position[index3]);
-	float  rad = cuConstRendererParams.radius[index];
-
-	// compute the bounding box of the circle. The bound is in integer
-	// screen coordinates, so it's clamped to the edges of the screen.
-	short imageWidth = cuConstRendererParams.imageWidth;
-	short imageHeight = cuConstRendererParams.imageHeight;
-	short minX = static_cast<short>(imageWidth * (p.x - rad));
-	short maxX = static_cast<short>(imageWidth * (p.x + rad)) + 1;
-	short minY = static_cast<short>(imageHeight * (p.y - rad));
-	short maxY = static_cast<short>(imageHeight * (p.y + rad)) + 1;
-
-	// a bunch of clamps.  Is there a CUDA built-in for this?
-	short screenMinX = (minX > 0) ? ((minX < imageWidth) ? minX : imageWidth) : 0;
-	short screenMaxX = (maxX > 0) ? ((maxX < imageWidth) ? maxX : imageWidth) : 0;
-	short screenMinY = (minY > 0) ? ((minY < imageHeight) ? minY : imageHeight) : 0;
-	short screenMaxY = (maxY > 0) ? ((maxY < imageHeight) ? maxY : imageHeight) : 0;
-
-	float invWidth = 1.f / imageWidth;
-	float invHeight = 1.f / imageHeight;
-
-	// for all pixels in the bonding box
-	for (int pixelY=screenMinY; pixelY<screenMaxY; pixelY++) {
-		float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * (pixelY * imageWidth + screenMinX)]);
-		for (int pixelX=screenMinX; pixelX<screenMaxX; pixelX++) {
-			float2 pixelCenterNorm = make_float2(invWidth * (static_cast<float>(pixelX) + 0.5f),
-												 invHeight * (static_cast<float>(pixelY) + 0.5f));
-			shadePixel(index, pixelCenterNorm, p, imgPtr);
-			imgPtr++;
-		}
-	}
-}
-
 __global__ void kernelGetBBox(BoundingBox* bound_box)
 {
 	int index = blockIdx.x * blockDim.x + threadIdx.x;
@@ -502,8 +461,8 @@ __global__ void kernelGetPixelCricleNum(int* pixel_circlenum, int2 topleft, int 
 	const int height = cuConstRendererParams.imageHeight;
 
 	int pixelIdx = pixelY * width + pixelX;
-	float pXcenter = float(pixelX)/width + 0.5;
-	float pYcenter = float(pixelY)/height + 0.5;
+	float pXcenter = float(pixelX + 0.5)/width;
+	float pYcenter = float(pixelY + 0.5)/height;
 	float diffX = pXcenter - circlePos.x;
 	float diffY = pYcenter - circlePos.y;
 	float distance = diffX*diffX + diffY*diffY;
@@ -511,6 +470,10 @@ __global__ void kernelGetPixelCricleNum(int* pixel_circlenum, int2 topleft, int 
 
 	if(distance <= radius*radius)
 		atomicAdd(pixel_circlenum + pixelIdx, 1);
+
+	// if(circleIndex==0 && pixelY==512 && pixelX%10==0) {
+	// 	printf("(%d, %d), diffxy: %f %f  radius: %f\n", pixelX, pixelY, diffX, diffY, radius);
+	// }
 }
 
 __global__ void kernelGetPixelCricleList(
@@ -528,8 +491,8 @@ __global__ void kernelGetPixelCricleList(
 	const int height = cuConstRendererParams.imageHeight;
 
 	int pixelIdx = pixelY * width + pixelX;
-	float pXcenter = float(pixelX)/width + 0.5;
-	float pYcenter = float(pixelY)/height + 0.5;
+	float pXcenter = float(pixelX + 0.5)/width;
+	float pYcenter = float(pixelY + 0.5)/height;
 	float diffX = pXcenter - circlePos.x;
 	float diffY = pYcenter - circlePos.y;
 	float distance = diffX*diffX + diffY*diffY;
@@ -561,8 +524,8 @@ __global__ void kernelGetPixelColor(
 	int list_start = max_pixel_circlenum * pixelIdx;
 	int* thislist = pixel_circle_list + list_start;
 
-	float pXcenter = float(pixelX)/width + 0.5;
-	float pYcenter = float(pixelY)/height + 0.5;
+	float pXcenter = float(pixelX + 0.5)/width;
+	float pYcenter = float(pixelY + 0.5)/height;
 
 	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * pixelIdx]);
 	for(int i=0; i<circle_count; i++) {
@@ -604,11 +567,6 @@ CudaRenderer::render()
 	dim3 gridDim(unitcount(numCircles, blockDim.x));
 	const int tot_pixelnum = image->width * image->height;
 
-	// record every pixel's circle number
-	int* dev_pixel_circlenum;
-	cudaMalloc(&dev_pixel_circlenum, tot_pixelnum * sizeof(int));
-	cudaMemset(dev_pixel_circlenum, 0, tot_pixelnum * sizeof(int));
-
 	// 计算bounding box, 并传回host
 	BoundingBox* dev_bound_box;
 	BoundingBox* bound_box;
@@ -618,6 +576,16 @@ CudaRenderer::render()
 	kernelGetBBox<<<gridDim, blockDim>>>(dev_bound_box);
 	cudaCheckError(cudaDeviceSynchronize());
 	cudaMemcpy(bound_box, dev_bound_box, numCircles * sizeof(BoundingBox), cudaMemcpyDeviceToHost);
+
+	//right
+	// for(int i=0; i<numCircles; i++) {
+	// 	cout<<i<<' '<<bound_box[i]<<endl;
+	// }
+
+	// record every pixel's circle number
+	int* dev_pixel_circlenum;
+	cudaMalloc(&dev_pixel_circlenum, tot_pixelnum * sizeof(int));
+	cudaMemset(dev_pixel_circlenum, 0, tot_pixelnum * sizeof(int));
 
 	// 统计每个像素上圆的数量
 	for(int i=0; i<numCircles; i++) {
@@ -630,6 +598,19 @@ CudaRenderer::render()
 	}
 	cudaCheckError(cudaDeviceSynchronize());
 
+	int* pixel_circlenum = new int[tot_pixelnum];
+	cudaMemcpy(pixel_circlenum, dev_pixel_circlenum, 
+		       tot_pixelnum * sizeof(int), cudaMemcpyDeviceToHost);
+
+	// for(int x=0; x<image->width; x++) {
+	// 	for(int y=0; y<image->height; y++) {
+	// 		if(y==512 && x%20==0) {
+	// 			printf("(%d, %d), circle num : %d\n", x, y, pixel_circlenum[y*image->width + x]);
+	// 		}
+	// 	}
+	// }
+
+
 	// 分配每个像素存储圆编号的内存
 	int* dev_pixel_circle_list;
 	int max_pixel_circlenum = cudaThrustMax(dev_pixel_circlenum, tot_pixelnum);
@@ -638,6 +619,8 @@ CudaRenderer::render()
 	int* dev_pixel_list_ptr; //当前圆编号列表大小
 	cudaMalloc(&dev_pixel_list_ptr, sizeof(int)*tot_pixelnum);
 	cudaCheckError(cudaMemset(dev_pixel_list_ptr, 0, sizeof(int)*tot_pixelnum));
+
+	printf("get list begin\n");
 
 	// 获得每个像素上圆的列表(无序)
 	for(int i=0; i<numCircles; i++) {
@@ -649,20 +632,24 @@ CudaRenderer::render()
 			make_int2(box.minX, box.minY), i, max_pixel_circlenum
 		);
 	}
-	cudaCheckError(cudaDeviceSynchronize());
+	cudaCheckError(cudaDeviceSynchronize())
 
-	int* pixel_circlenum = new int[tot_pixelnum];
-	cudaMemcpy(pixel_circlenum, dev_pixel_circlenum, 
-		       tot_pixelnum * sizeof(int), cudaMemcpyDeviceToHost);
+	printf("get list finished\n");
 
 	for(int i=0, j=0; i<tot_pixelnum; i++) {
 		cudaThrustSort(dev_pixel_circle_list + j, dev_pixel_circle_list + j + pixel_circlenum[i]);
 		j += max_pixel_circlenum;
 	}
+	cudaCheckError(cudaDeviceSynchronize());
+
+	printf("sort finished\n");
 
 	const dim3 blockDim2(16, 16);
 	const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
 	kernelGetPixelColor<<<gridDim2, blockDim2>>>(dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
+	cudaCheckError(cudaDeviceSynchronize());
+
+	printf("all finished\n");
 
 	delete[] bound_box;
 	delete[] pixel_circlenum;
