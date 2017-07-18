@@ -61,9 +61,9 @@ struct BoundingBox {
 	int width, height;
 	int pixelnum;
 
-	BoundingBox() {}
+	__host__ __device__ BoundingBox() {}
 
-	BoundingBox(int minX, int maxX, int minY, int maxY, int w, int h, int pixelnum):
+	__host__ __device__ BoundingBox(int minX, int maxX, int minY, int maxY, int w, int h, int pixelnum):
 		minX(minX), maxX(maxX), minY(minY), maxY(maxY), 
 		width(w), height(h), pixelnum(pixelnum) {}
 };
@@ -353,18 +353,12 @@ __global__ void kernelAdvanceSnowflake() {
 // pixel from the circle.  Update of the image is done in this
 // function.  Called by kernelRenderCircles()
 __device__ __inline__ void
-shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) {
-
+shadePixel(int circleIndex, float2 pixelCenter, float3 p, float4* imagePtr) 
+{
 	float diffX = p.x - pixelCenter.x;
 	float diffY = p.y - pixelCenter.y;
 	float pixelDist = diffX * diffX + diffY * diffY;
-
 	float rad = cuConstRendererParams.radius[circleIndex];
-	float maxDist = rad * rad;
-
-	// circle does not contribute to the image
-	if (pixelDist > maxDist)
-		return;
 
 	float3 rgb;
 	float alpha;
@@ -545,13 +539,13 @@ __global__ void kernelGetPixelCricleList(
 		//inside
 		// get old and atomic update list ptr
 		int list_idx = max_pixel_circlenum * pixelIdx + 
-		               atomicAdd(pixel_list_ptr[pixelIdx], 1);
+		               atomicAdd(pixel_list_ptr + pixelIdx, 1);
 		pixel_circle_list[list_idx] = circleIndex;
 	}
 }
 
 __global__ void kernelGetPixelColor(
-	int* pixel_circle_list, int* pixel_circlenum
+	int* pixel_circle_list, int* pixel_circlenum, int max_pixel_circlenum
 )
 {
 	int pixelX = blockDim.x * blockIdx.x + threadIdx.x;
@@ -565,11 +559,17 @@ __global__ void kernelGetPixelColor(
 	int pixelIdx = pixelY * width + pixelX;
 	int circle_count = pixel_circlenum[pixelIdx];
 	int list_start = max_pixel_circlenum * pixelIdx;
+	int* thislist = pixel_circle_list + list_start;
 
 	float pXcenter = float(pixelX)/width + 0.5;
 	float pYcenter = float(pixelY)/height + 0.5;
 
-	
+	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4 * pixelIdx]);
+	for(int i=0; i<circle_count; i++) {
+		int circleIdx = thislist[i];
+		float3 pos = *(float3*)(&cuConstRendererParams.position[3*circleIdx]);
+		shadePixel(circleIdx, make_float2(pXcenter, pYcenter), pos, imgPtr);
+	}
 }
 
 
@@ -660,7 +660,9 @@ CudaRenderer::render()
 		j += max_pixel_circlenum;
 	}
 
-
+	const dim3 blockDim2(16, 16);
+	const dim3 gridDim2(unitcount(image->width, blockDim2.x), unitcount(image->height, blockDim2.y));
+	kernelGetPixelColor<<<gridDim2, blockDim2>>>(dev_pixel_circle_list, dev_pixel_circlenum, max_pixel_circlenum);
 
 	delete[] bound_box;
 	delete[] pixel_circlenum;
