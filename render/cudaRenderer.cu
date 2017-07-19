@@ -68,23 +68,6 @@ struct GlobalConstants {
 	float* imageData;
 };
 
-struct BoundingBox {
-	int minX, maxX, minY, maxY;
-	int width, height;
-	int pixelnum;
-
-	__host__ __device__ BoundingBox() {}
-
-	__host__ __device__ BoundingBox(int minX, int maxX, int minY, int maxY, int w, int h, int pixelnum):
-		minX(minX), maxX(maxX), minY(minY), maxY(maxY), 
-		width(w), height(h), pixelnum(pixelnum) {}
-
-	friend std::ostream& operator<<(std::ostream& out, const BoundingBox& box) {
-		out<<"min, max X, Y  "<<box.minX<<' '<<box.maxX<<' '<<box.minY<<' '<<box.maxY;
-		return out;
-	}
-};
-
 // Global variable that is in scope, but read-only, for all cuda
 // kernels.  The __constant__ modifier designates this variable will
 // be stored in special "constant" memory on the GPU. (we didn't talk
