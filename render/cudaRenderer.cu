@@ -481,6 +481,7 @@ __global__ void kernelGetPixelColor(
 	);
 	int imgIdx = imgY * width + imgX;
 	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4*imgIdx]);
+	float4 imgColor = *imgPtr;
 
 	int boxX = imgX / BOX_SIZE;
 	int boxY = imgY / BOX_SIZE;
@@ -492,8 +493,9 @@ __global__ void kernelGetPixelColor(
 	for(int i=0; i<circleCount; i++) {
 		int circleIdx = circle_in_box[boxOffset + i];
 		float3 p = *(float3*)(&cuConstRendererParams.position[3 * circleIdx]);
-		shadePixel(circleIdx, pixelCenter, p, imgPtr);
+		shadePixel(circleIdx, pixelCenter, p, &imgColor);
 	}
+	*imgPtr = imgColor;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
