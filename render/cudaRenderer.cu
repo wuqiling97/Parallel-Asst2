@@ -25,7 +25,7 @@ using std::cout; using std::endl;
 
 #define BOX_SIZE 16
 
-#define DEBUG
+// #define DEBUG
 
 #ifdef DEBUG
 #define cudaCheckError(ans) { cudaAssert((ans), __FILE__, __LINE__); }
@@ -445,8 +445,8 @@ __global__ void kernelGetCircleInBox(
 	float inv_height = 1.f / height;
 
 	float boxL = float(boxX * BOX_SIZE) * inv_width;
-	float boxR = float((boxX + 1) * BOX_SIZE) * inv_width;
-	float boxT = float((boxY + 1) * BOX_SIZE) * inv_height;
+	float boxR = float(boxX * BOX_SIZE + BOX_SIZE) * inv_width;
+	float boxT = float(boxY * BOX_SIZE + BOX_SIZE) * inv_height;
 	float boxB = float(boxY * BOX_SIZE) * inv_height;
 
 	int circleNum = cuConstRendererParams.numCircles;
@@ -473,11 +473,9 @@ __global__ void kernelGetPixelColor(
 	if(imgX >= width || imgY >= height)
 		return;
 
-	float inv_width = 1.f / width;
-	float inv_height = 1.f / height;
 	float2 pixelCenter = make_float2(
-		(float(imgX) + 0.5) * inv_width,
-		(float(imgY) + 0.5) * inv_height
+		(float(imgX) + 0.5) / width,
+		(float(imgY) + 0.5) / height
 	);
 	int imgIdx = imgY * width + imgX;
 	float4* imgPtr = (float4*)(&cuConstRendererParams.imageData[4*imgIdx]);
@@ -508,9 +506,6 @@ CudaRenderer::render()
 	const int box_x_num = unitcount(image->width, BOX_SIZE);
 	const int box_y_num = unitcount(image->height, BOX_SIZE);
 
-	// cudaMalloc(&dev_circle_in_box, box_x_num*box_y_num*numCircles*sizeof(int));
-	// cudaMalloc(&dev_box_circle_num, box_x_num * box_y_num * sizeof(int));
-
 	const dim3 blockDimBox(8, 8);
 	dim3 gridDimBox(unitcount(box_x_num, blockDimBox.x),
 		            unitcount(box_y_num, blockDimBox.y));
@@ -531,9 +526,6 @@ CudaRenderer::render()
 
 	double part2 = CycleTimer::currentSeconds();
 	printf("get pixel color: %f ms\n", (part2 - start)*1000);
-
-	// double end = CycleTimer::currentSeconds();
-	// printf("end: %f ms\n", (end - start)*1000);
 }
 
 CudaRenderer::CudaRenderer() {
